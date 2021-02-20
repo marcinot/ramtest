@@ -3,8 +3,10 @@
 #include <chrono> 
 #include <pthread.h>
 #include <errno.h>
+#include <assert.h>
 
 
+#define RANDDEV "/dev/urandom"
 
 using namespace std; 
 using namespace std::chrono; 
@@ -43,10 +45,26 @@ uint32_t xorshift32(struct xorshift32_state *state)
 
 
 
+
+unsigned long long bigrand(void) {
+    FILE *rdp;
+    unsigned long long num;
+
+    rdp = fopen(RANDDEV, "rb");
+    assert(rdp);
+
+    assert(fread(&num, sizeof(num), 1, rdp) == 1);
+
+    fclose(rdp);
+
+    return num;
+}
+
+
 word_type* create_table(uint64_t table_size)
 {
 	xorshift32_state rnd;
-	rnd.a = time(0);
+	rnd.a = bigrand();
 	word_type* table = new word_type[table_size];		
 	for(uint64_t i=0; i<table_size; i++)
 	{
@@ -81,7 +99,7 @@ void* benchmark_ram_randomread_worker(void* arg) {
 void gen_batch_buffer_pos(uint64_t* batch_buffer_pos, uint64_t batch_buffer_size)
 {
 	xorshift32_state rnd;
-	rnd.a = time(0);
+	rnd.a = bigrand();
 	
 	for(uint64_t i=0; i<batch_buffer_size; i++)
 		batch_buffer_pos[i] = xorshift32(&rnd) % TABLE_SIZE;		
