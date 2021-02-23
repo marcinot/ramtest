@@ -4,7 +4,8 @@
 #include <pthread.h>
 #include <errno.h>
 #include <assert.h>
-
+#include <emmintrin.h>
+#include <smmintrin.h>
 
 #define RANDDEV "/dev/urandom"
 
@@ -12,9 +13,10 @@ using namespace std;
 using namespace std::chrono; 
 
 typedef unsigned __int128 word_type;
+typedef uint64_t pos_type;
 
 const uint64_t TABLE_SIZE = 268435456UL;
-const uint64_t BATCH_BUFFER_SIZE = 8*1024*1024;
+const uint64_t BATCH_BUFFER_SIZE = 16*1024*1024;
 
 
 
@@ -26,7 +28,7 @@ struct worker_arg {
 	int tid;
 	word_type* table;
 	uint64_t batch_buffer_size;
-	uint64_t* batch_buffer_pos;
+	pos_type* batch_buffer_pos;
 	word_type* batch_buffer_words;
 	int num_threads;	
 };
@@ -85,18 +87,22 @@ void* benchmark_ram_randomread_worker(void* arg) {
 	uint64_t end_idx = start_idx + worker_batch_size;
 	
 	
+	word_type* out_buff = wa->batch_buffer_words;
+	word_type* in_buff = wa->table;
+	pos_type* pos_buff = wa->batch_buffer_pos;
+	
 	
 	for(uint64_t idx = start_idx; idx<end_idx; idx++)
-	{
-		wa->batch_buffer_words[idx] = wa->table [ wa->batch_buffer_pos[idx] ]; 
+	{						
+		pos_type p = pos_buff[idx];		
+		const __m128i val = _mm_stream_load_si128 ((__m128i *)(in_buff + p) );
+		_mm_stream_si128 ((__m128i *)(out_buff + idx), val);
 	}
-	
-
-				
+					
 	return NULL;
 }
 
-void gen_batch_buffer_pos(uint64_t* batch_buffer_pos, uint64_t batch_buffer_size)
+void gen_batch_buffer_pos(pos_type* batch_buffer_pos, uint64_t batch_buffer_size)
 {
 	xorshift32_state rnd;
 	rnd.a = bigrand();
@@ -110,7 +116,7 @@ void gen_batch_buffer_pos(uint64_t* batch_buffer_pos, uint64_t batch_buffer_size
 
 uint64_t benchmark_ram_randomread_multithread(word_type* table, uint64_t batch_buffer_size, int num_threads, double& total_time)
 {
-	uint64_t* batch_buffer_pos = new uint64_t[batch_buffer_size];
+	pos_type* batch_buffer_pos = new pos_type[batch_buffer_size];
 	word_type* batch_buffer_words = new word_type[batch_buffer_size];
 	
 	gen_batch_buffer_pos(batch_buffer_pos, batch_buffer_size);
@@ -174,7 +180,7 @@ int main()
 		
 		printf("table_size=%lu num_threads=%d checksum=%lu total_time=%f workers_time=%f copy_per_sec=%f\n", TABLE_SIZE, t, sum, total_time, workers_total_time, BATCH_BUFFER_SIZE / workers_total_time );		
 		
-		t = t * 2;
+		t = t +1;
 	}
 	
 	delete [] table;	
