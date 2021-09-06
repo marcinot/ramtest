@@ -3,16 +3,22 @@
 #include <chrono> 
 #include <pthread.h>
 #include <errno.h>
+#include <assert.h>
+#include <emmintrin.h>
+#include <smmintrin.h>
 
-
+#define RANDDEV "/dev/urandom"
 
 using namespace std; 
 using namespace std::chrono; 
 
-const int TABLE_SIZE_MIN_BITS = 8;
-const int TABLE_SIZE_MAX_BITS = 30;
-const uint64_t TABLE_SIZE_MAX = 1UL << TABLE_SIZE_MAX_BITS;
-const uint64_t NUM_READS = 50000000UL;
+typedef unsigned __int128 word_type;
+typedef uint64_t pos_type;
+
+uint64_t TABLE_SIZE = 268435456UL;
+uint64_t BATCH_BUFFER_SIZE = 16*1024*1024;
+
+
 
 struct xorshift32_state {
   uint32_t a;
@@ -20,12 +26,11 @@ struct xorshift32_state {
 
 struct worker_arg {
 	int tid;
-	uint8_t* table;
-	uint64_t table_size_bits;
-	uint64_t num_reads;
-	uint32_t seed;
-	
-	uint64_t output_sum;
+	word_type* table;
+	uint64_t batch_buffer_size;
+	pos_type* batch_buffer_pos;
+	word_type* batch_buffer_words;
+	int num_threads;	
 };
 
 /* The state word must be initialized to non-zero */
@@ -42,11 +47,27 @@ uint32_t xorshift32(struct xorshift32_state *state)
 
 
 
-uint8_t* create_table(uint64_t table_size)
+
+unsigned long long bigrand(void) {
+    FILE *rdp;
+    unsigned long long num;
+
+    rdp = fopen(RANDDEV, "rb");
+    assert(rdp);
+
+    assert(fread(&num, sizeof(num), 1, rdp) == 1);
+
+    fclose(rdp);
+
+    return num;
+}
+
+
+word_type* create_table(uint64_t table_size)
 {
 	xorshift32_state rnd;
-	rnd.a = time(0);
-	uint8_t* table = new uint8_t[table_size];		
+	rnd.a = bigrand();
+	word_type* table = new word_type[table_size];		
 	for(uint64_t i=0; i<table_size; i++)
 	{
 		table[i] = xorshift32(&rnd) & 0xff;
@@ -54,88 +75,155 @@ uint8_t* create_table(uint64_t table_size)
 	return table;
 }
 
-uint64_t benchmark_ram_randomread(uint8_t* table, uint64_t table_size_bits, uint64_t num_reads, uint32_t seed)
-{
-	uint64_t table_size_mask = (1 << table_size_bits) - 1;
-	uint64_t sum = 0;
-	xorshift32_state rnd;
-	rnd.a = seed;
-	
-	for(uint64_t i=0; i<num_reads; i++)
-	{
-		uint64_t pos = (uint64_t(xorshift32(&rnd)) & table_size_mask);
-		uint8_t v = table[pos];
-		sum+=v;
-	}
-		
-	return sum;
-}
-
 
 void* benchmark_ram_randomread_worker(void* arg) {	
+	
+
 	worker_arg* wa = (worker_arg*)arg;	
-	wa->output_sum = benchmark_ram_randomread(wa->table, wa->table_size_bits, wa->num_reads, wa->seed);	
+	
+	uint64_t worker_batch_size = wa->batch_buffer_size / wa->num_threads;
+	
+	uint64_t start_idx = worker_batch_size * wa->tid;
+	uint64_t end_idx = start_idx + worker_batch_size;
+	
+	
+	word_type* out_buff = wa->batch_buffer_words;
+	word_type* in_buff = wa->table;
+	pos_type* pos_buff = wa->batch_buffer_pos;
+	
+	
+	for(uint64_t idx = start_idx; idx<end_idx; idx++)
+	{						
+		pos_type p = pos_buff[idx];		
+		const __m128i val = _mm_stream_load_si128 ((__m128i *)(in_buff + p) );
+		_mm_stream_si128 ((__m128i *)(out_buff + idx), val);
+	}
+					
 	return NULL;
 }
 
-
-uint64_t benchmark_ram_randomread_multithread(uint8_t* table, uint64_t table_size_bits, uint64_t num_reads, int num_threads)
+void gen_batch_buffer_pos(pos_type* batch_buffer_pos, uint64_t batch_buffer_size)
 {
+	xorshift32_state rnd;
+	rnd.a = bigrand();
+	
+	for(uint64_t i=0; i<batch_buffer_size; i++)
+		batch_buffer_pos[i] = xorshift32(&rnd) % TABLE_SIZE;		
+		
+}
+
+
+
+uint64_t benchmark_ram_randomread_multithread(word_type* table, uint64_t batch_buffer_size, int num_threads, double& total_time)
+{
+	pos_type* batch_buffer_pos = new pos_type[batch_buffer_size];
+	word_type* batch_buffer_words = new word_type[batch_buffer_size];
+	
+	gen_batch_buffer_pos(batch_buffer_pos, batch_buffer_size);
+
 	pthread_t* pids = new pthread_t[num_threads];
 	worker_arg* args = new worker_arg[num_threads];
 	
+		auto start = high_resolution_clock::now(); 
+
 	for (int i=0; i < num_threads; i++) {
 		args[i].tid = i;
 		args[i].table = table;
-		args[i].table_size_bits = table_size_bits;
-		args[i].num_reads = num_reads / num_threads;		
-		args[i].seed = (table_size_bits * (i+1) * num_threads) ^ (table_size_bits + (i+1) + num_threads);
-		
+		args[i].batch_buffer_pos = batch_buffer_pos;
+		args[i].batch_buffer_words = batch_buffer_words;
+		args[i].num_threads = num_threads;
+		args[i].batch_buffer_size = batch_buffer_size;
+						
 		pthread_create(&pids[i], NULL, benchmark_ram_randomread_worker, &args[i]);
 	}
 
+
 	/* oczekiwanie na zakończenie wszystkich wątków */
 	for (int i=0; i < num_threads; i++) {
-		pthread_join(pids[i], NULL);
+		pthread_join(pids[i], NULL);		
 	}
+	
+
+	auto stop = high_resolution_clock::now(); 
+	auto duration = duration_cast<microseconds>(stop - start); 
+	total_time = duration.count() / 1000000.0;	
+
 	
 	uint64_t sum = 0;
-	for(int i=0; i<num_threads; i++)
+	for(int i=0; i<batch_buffer_size; i++)
 	{
-		sum += args[i].output_sum;
+		sum += batch_buffer_words[i];
 	}
 		
-	
+	delete [] batch_buffer_pos;
+	delete [] batch_buffer_words;
+	 	
 	delete [] pids;
 	return sum;
 }
 
 
-int main()
+int main(int argc, char* argv[])
 {	
-	uint8_t* table = create_table(TABLE_SIZE_MAX);	
+	int num_threads=32;
+	int table_size_in_mib = 512;
+	int copy_batch_size_in_kib = 1024;
+	int num_iterations = 10;
 	
-	for(int t=1; t<=32; t++)
-	{		
-		for(int table_size_bits = TABLE_SIZE_MIN_BITS; table_size_bits <= TABLE_SIZE_MAX_BITS; table_size_bits++)
-		{
-			uint64_t table_size = 1UL << table_size_bits;
-			
-		
-	    		auto start = high_resolution_clock::now(); 
-	   
-
-			uint64_t sum = benchmark_ram_randomread_multithread(table, table_size_bits, NUM_READS, t);
-
-			auto stop = high_resolution_clock::now(); 
-			auto duration = duration_cast<microseconds>(stop - start); 
-			double total_time = duration.count() / 1000000.0;
-			
-			printf("table_size=%lu num_threads=%d checksum=%lu time=%f reads_per_sec=%f\n", table_size, t, sum, total_time, NUM_READS / total_time );
-				
-		}
+	if (argc < 2)
+	{
+		printf("ramtest <num_threads> <table_size_in_mebibytes> <copy_batch_size_in_kibibytes> <num_iterations>\n");
+		return 0;
 	}
 	
-	delete  table;	
+	num_threads = atoi(argv[1]);
+	
+	if (argc>2)	
+		table_size_in_mib = atoi(argv[2]);
+		
+	TABLE_SIZE = table_size_in_mib * 1024UL * 1024UL / sizeof(word_type);
+	
+	
+	if (argc>3)
+		copy_batch_size_in_kib = atoi(argv[3]);
+		
+	BATCH_BUFFER_SIZE = copy_batch_size_in_kib * 1024UL / sizeof(word_type);
+	
+	
+	if (argc > 4)
+		num_iterations = atoi(argv[4]);
+
+	
+	printf("num_threads          : %d\n", num_threads);
+	printf("table_size           : %d Mib\n", table_size_in_mib);
+	printf("copy_batch_size      : %d Kib\n", copy_batch_size_in_kib);
+	printf("num_iterations       : %d\n", num_iterations);
+	
+	
+
+	word_type* table = create_table(TABLE_SIZE);	
+	
+	double sum_copy_per_sec;
+	int t = 1;
+	for(int i=0; i<num_iterations; i++)
+	{							
+		auto start = high_resolution_clock::now(); 
+		double workers_total_time = 0.0;
+		
+		uint64_t sum = benchmark_ram_randomread_multithread(table, BATCH_BUFFER_SIZE, t, workers_total_time);
+		auto stop = high_resolution_clock::now(); 
+		auto duration = duration_cast<microseconds>(stop - start); 
+		double total_time = duration.count() / 1000000.0;
+		double copy_per_sec = BATCH_BUFFER_SIZE / workers_total_time;
+		
+		printf("[%d] checksum=%lu total_time=%f workers_time=%f copy_per_sec=%f\n", i+1, sum, total_time, workers_total_time, copy_per_sec);		
+		
+		sum_copy_per_sec += copy_per_sec;
+		t = t +1;
+	}
+	
+	printf("avg_copy_per_sec %f\n", sum_copy_per_sec / num_iterations);
+	
+	delete [] table;	
 	return 0;
 }
