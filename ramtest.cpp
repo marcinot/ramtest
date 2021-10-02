@@ -208,7 +208,7 @@ int main(int argc, char* argv[])
 		double workers_total_time = 0.0;		
 		uint64_t sum = benchmark_ram_randomread_multithread(table, BATCH_BUFFER_SIZE, num_threads, workers_total_time);				
 		double copy_per_sec = BATCH_BUFFER_SIZE / workers_total_time;		
-		printf("[%d] checksum=%lu workers_time=%f copy_per_sec=%f\n", i+1, sum, total_time, workers_total_time, copy_per_sec);				
+		printf("[%d] checksum=%lu workers_time=%f copy_per_sec=%f\n", i+1, sum, workers_total_time, copy_per_sec);				
 		sum_copy_per_sec += copy_per_sec;		
 	}
 	
