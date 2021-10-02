@@ -198,28 +198,18 @@ int main(int argc, char* argv[])
 	printf("table_size           : %d Mib\n", table_size_in_mib);
 	printf("copy_batch_size      : %d Kib\n", copy_batch_size_in_kib);
 	printf("num_iterations       : %d\n", num_iterations);
-	
-	
-
+		
 	word_type* table = create_table(TABLE_SIZE);	
 	
 	double sum_copy_per_sec;
-	int t = 1;
+	
 	for(int i=0; i<num_iterations; i++)
-	{							
-		auto start = high_resolution_clock::now(); 
-		double workers_total_time = 0.0;
-		
-		uint64_t sum = benchmark_ram_randomread_multithread(table, BATCH_BUFFER_SIZE, t, workers_total_time);
-		auto stop = high_resolution_clock::now(); 
-		auto duration = duration_cast<microseconds>(stop - start); 
-		double total_time = duration.count() / 1000000.0;
-		double copy_per_sec = BATCH_BUFFER_SIZE / workers_total_time;
-		
-		printf("[%d] checksum=%lu total_time=%f workers_time=%f copy_per_sec=%f\n", i+1, sum, total_time, workers_total_time, copy_per_sec);		
-		
-		sum_copy_per_sec += copy_per_sec;
-		t = t +1;
+	{									
+		double workers_total_time = 0.0;		
+		uint64_t sum = benchmark_ram_randomread_multithread(table, BATCH_BUFFER_SIZE, num_threads, workers_total_time);				
+		double copy_per_sec = BATCH_BUFFER_SIZE / workers_total_time;		
+		printf("[%d] checksum=%lu workers_time=%f copy_per_sec=%f\n", i+1, sum, total_time, workers_total_time, copy_per_sec);				
+		sum_copy_per_sec += copy_per_sec;		
 	}
 	
 	printf("avg_copy_per_sec %f\n", sum_copy_per_sec / num_iterations);
