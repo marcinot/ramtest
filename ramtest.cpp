@@ -6,6 +6,10 @@
 #include <assert.h>
 #include <emmintrin.h>
 #include <smmintrin.h>
+#include <errno.h>
+
+#define handle_error_en(en, msg) \
+        do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
 
 #define RANDDEV "/dev/urandom"
 
@@ -73,6 +77,37 @@ word_type* create_table(uint64_t table_size)
 		table[i] = xorshift32(&rnd) & 0xff;
 	}
 	return table;
+}
+
+void affinity_set(int id)
+{
+           int s;
+           cpu_set_t cpuset;
+           pthread_t thread;
+
+        thread = pthread_self();
+
+           /* Set affinity mask to include CPUs 0 to 7. */
+
+           CPU_ZERO(&cpuset);
+           //for (int j = 0; j < 32; j++)
+               CPU_SET(id, &cpuset);
+
+           s = pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset);
+           if (s != 0)
+               handle_error_en(s, "pthread_setaffinity_np");
+
+           /* Check the actual affinity mask assigned to the thread. */
+
+           s = pthread_getaffinity_np(thread, sizeof(cpuset), &cpuset);
+           if (s != 0)
+               handle_error_en(s, "pthread_getaffinity_np");
+
+           //printf("[%d] Set returned by pthread_getaffinity_np() contained:\n", id);
+           /*for (int j = 0; j < CPU_SETSIZE; j++)
+               if (CPU_ISSET(j, &cpuset))
+                   printf("[%d]    CPU %d\n", id, j);*/
+
 }
 
 
