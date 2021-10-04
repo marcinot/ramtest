@@ -7,6 +7,7 @@
 #include <emmintrin.h>
 #include <smmintrin.h>
 #include <errno.h>
+#include "SafeQueue.h"
 
 #define handle_error_en(en, msg) \
         do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
@@ -24,18 +25,33 @@ uint64_t BATCH_BUFFER_SIZE = 16*1024*1024;
 
 
 
+
 struct xorshift32_state {
   uint32_t a;
 };
 
 struct worker_arg {
 	int tid;
-	word_type* table;
-	uint64_t batch_buffer_size;
+};
+
+struct batch_work {
+	word_type* table;	
 	pos_type* batch_buffer_pos;
 	word_type* batch_buffer_words;
-	int num_threads;	
+	uint64_t start;
+	uint64_t end;
 };
+
+struct batch_result {
+	uint64_t sum;
+};
+
+pthread_t* pids;
+worker_arg* args;
+SafeQueue<batch_work> works_queue;
+SafeQueue<batch_result> results_queue;
+
+
 
 /* The state word must be initialized to non-zero */
 uint32_t xorshift32(struct xorshift32_state *state)
@@ -113,26 +129,37 @@ void affinity_set(int id)
 
 void* benchmark_ram_randomread_worker(void* arg) {	
 	
-
 	worker_arg* wa = (worker_arg*)arg;	
+	affinity_set(wa->tid);
 	
-	uint64_t worker_batch_size = wa->batch_buffer_size / wa->num_threads;
+	while(true) {
+		batch_work work = works_queue.dequeue();
+		if (work.end == 0)
+			break;
+		
 	
-	uint64_t start_idx = worker_batch_size * wa->tid;
-	uint64_t end_idx = start_idx + worker_batch_size;
-	
-	
-	word_type* out_buff = wa->batch_buffer_words;
-	word_type* in_buff = wa->table;
-	pos_type* pos_buff = wa->batch_buffer_pos;
-	
-	
-	for(uint64_t idx = start_idx; idx<end_idx; idx++)
-	{						
-		pos_type p = pos_buff[idx];		
-		const __m128i val = _mm_stream_load_si128 ((__m128i *)(in_buff + p) );
-		_mm_stream_si128 ((__m128i *)(out_buff + idx), val);
+		
+		
+		uint64_t start_idx = work.start;
+		uint64_t end_idx = work.end;
+		
+		
+		word_type* out_buff = work.batch_buffer_words;
+		word_type* in_buff = work.table;
+		pos_type* pos_buff = work.batch_buffer_pos;
+		
+		
+		for(uint64_t idx = start_idx; idx<end_idx; idx++)
+		{						
+			pos_type p = pos_buff[idx];		
+			const __m128i val = _mm_stream_load_si128 ((__m128i *)(in_buff + p) );
+			_mm_stream_si128 ((__m128i *)(out_buff + idx), val);
+		}
+		
+		batch_result res;
+		results_queue.enqueue(res);
 	}
+	
 					
 	return NULL;
 }
@@ -147,6 +174,34 @@ void gen_batch_buffer_pos(pos_type* batch_buffer_pos, uint64_t batch_buffer_size
 		
 }
 
+void create_threads(int num_threads)
+{
+	pids = new pthread_t[num_threads];
+	args = new worker_arg[num_threads];
+	
+	for (int i=0; i < num_threads; i++) {
+		args[i].tid = i;						
+		pthread_create(&pids[i], NULL, benchmark_ram_randomread_worker, &args[i]);
+	}
+		
+}
+
+
+void delete_threads(int num_threads)
+{
+	for (int i=0; i < num_threads; i++) {
+		batch_work work;
+		work.end = 0;	
+		works_queue.enqueue(work);
+	}
+	
+	for (int i=0; i < num_threads; i++) {
+		pthread_join(pids[i], NULL);		
+	}
+	delete [] pids;
+	delete [] args;	
+}
+
 
 
 uint64_t benchmark_ram_randomread_multithread(word_type* table, uint64_t batch_buffer_size, int num_threads, double& total_time)
@@ -156,29 +211,30 @@ uint64_t benchmark_ram_randomread_multithread(word_type* table, uint64_t batch_b
 	
 	gen_batch_buffer_pos(batch_buffer_pos, batch_buffer_size);
 
-	pthread_t* pids = new pthread_t[num_threads];
-	worker_arg* args = new worker_arg[num_threads];
 	
-		auto start = high_resolution_clock::now(); 
+	auto start = high_resolution_clock::now(); 
 
 	for (int i=0; i < num_threads; i++) {
-		args[i].tid = i;
-		args[i].table = table;
-		args[i].batch_buffer_pos = batch_buffer_pos;
-		args[i].batch_buffer_words = batch_buffer_words;
-		args[i].num_threads = num_threads;
-		args[i].batch_buffer_size = batch_buffer_size;
-						
-		pthread_create(&pids[i], NULL, benchmark_ram_randomread_worker, &args[i]);
+		batch_work work;
+		
+		work.table = table;
+		work.batch_buffer_pos = batch_buffer_pos;
+		work.batch_buffer_words = batch_buffer_words;
+		
+		uint64_t worker_batch_size = batch_buffer_size / num_threads;
+				
+		work.start = worker_batch_size * i;
+		work.end = work.start + worker_batch_size;
+			
+		works_queue.enqueue(work);		
 	}
-
-
+	
 	/* oczekiwanie na zakończenie wszystkich wątków */
 	for (int i=0; i < num_threads; i++) {
-		pthread_join(pids[i], NULL);		
+		batch_result res;
+		res = results_queue.dequeue();						
 	}
 	
-
 	auto stop = high_resolution_clock::now(); 
 	auto duration = duration_cast<microseconds>(stop - start); 
 	total_time = duration.count() / 1000000.0;	
@@ -193,7 +249,7 @@ uint64_t benchmark_ram_randomread_multithread(word_type* table, uint64_t batch_b
 	delete [] batch_buffer_pos;
 	delete [] batch_buffer_words;
 	 	
-	delete [] pids;
+	
 	return sum;
 }
 
@@ -235,6 +291,7 @@ int main(int argc, char* argv[])
 	printf("num_iterations       : %d\n", num_iterations);
 		
 	word_type* table = create_table(TABLE_SIZE);	
+	create_threads(num_threads);
 	
 	double sum_copy_per_sec;
 	
@@ -248,7 +305,8 @@ int main(int argc, char* argv[])
 	}
 	
 	printf("avg_copy_per_sec %f\n", sum_copy_per_sec / num_iterations);
-	
+
+	delete_threads(num_threads);
 	delete [] table;	
 	return 0;
 }
