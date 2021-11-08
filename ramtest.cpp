@@ -329,6 +329,6 @@ int main(int argc, char* argv[])
 
 	delete_threads(num_threads);
 	//delete [] table;	
-	free(table);
+	//free(table);
 	return 0;
 }
