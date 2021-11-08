@@ -7,6 +7,7 @@
 #include <emmintrin.h>
 #include <smmintrin.h>
 #include <errno.h>
+#include <sys/mman.h>
 #include "SafeQueue.h"
 
 #define handle_error_en(en, msg) \
@@ -328,6 +329,6 @@ int main(int argc, char* argv[])
 
 	delete_threads(num_threads);
 	//delete [] table;	
-	free(table)
+	free(table);
 	return 0;
 }
