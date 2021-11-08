@@ -51,7 +51,25 @@ worker_arg* args;
 SafeQueue<batch_work> works_queue;
 SafeQueue<batch_result> results_queue;
 
-
+void* hugealloc(size_t bytes)
+{
+        size_t  huge_page_size = 2048*1024;
+        uint64_t nh = bytes / huge_page_size;
+        if ((bytes % huge_page_size) != 0)
+        {
+                printf("Invalid param bytes for hugealloc %lu\n", bytes);
+                exit(-1);
+        }
+        printf("Allocating %lu Huge pages\n", nh);
+        void *ptr = mmap(NULL, nh * (1 << 21), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,-1, 0);
+	if (ptr == MAP_FAILED)
+	{
+		perror("hugealloc error");
+		exit(-1);
+	}
+        printf("Allocated Huge pages\n");
+        return ptr;
+}
 
 /* The state word must be initialized to non-zero */
 uint32_t xorshift32(struct xorshift32_state *state)
@@ -87,10 +105,12 @@ word_type* create_table(uint64_t table_size)
 {
 	xorshift32_state rnd;
 	rnd.a = bigrand();
-	word_type* table = new word_type[table_size];		
+	//word_type* table = new word_type[table_size];		
+	word_type* table = (word_type*) hugealloc(table_size * sizeof(word_type));
 	for(uint64_t i=0; i<table_size; i++)
 	{
-		table[i] = xorshift32(&rnd) & 0xff;
+		//table[i] = xorshift32(&rnd) & 0xff;
+		table[i] = i;
 	}
 	return table;
 }
@@ -307,6 +327,7 @@ int main(int argc, char* argv[])
 	printf("avg_copy_per_sec %f\n", sum_copy_per_sec / num_iterations);
 
 	delete_threads(num_threads);
-	delete [] table;	
+	//delete [] table;	
+	free(table)
 	return 0;
 }
